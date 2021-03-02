@@ -1,0 +1,24 @@
+name: YoloDB 
+
+model:
+  backbone: 
+    name: resnet18
+    args: None
+  neck: 
+    name: FPN 
+    args: None
+  head: 
+    name: DBhead
+    args: None 
+  loss: 
+    name: L1BalanceCELoss
+    args: None 
+
+dataset: None
+
+
+train:
+  seed: 2021 
+  epochs: 500
+  batch_size: 2
+
