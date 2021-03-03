@@ -6,8 +6,8 @@ import pyclipper
 
 class SegDetectorRepresenter():
     thresh = 0.3
-    box_thresh = default=0.7
-    max_candidates = default=100
+    box_thresh = 0.7
+    max_candidates = 1000
     dest = 'binary'
 
     def __init__(self, cmd={}, **kwargs):
@@ -120,7 +120,8 @@ class SegDetectorRepresenter():
         _bitmap: single map with shape (1, H, W),
             whose values are binarized as {0, 1}
         '''
-        
+        # print(pred.shape)
+        # print(_bitmap.shape)
         assert _bitmap.size(0) == 1
         bitmap = _bitmap.cpu().numpy()[0]  # The first channel
         pred = pred.cpu().detach().numpy()[0]
@@ -131,7 +132,6 @@ class SegDetectorRepresenter():
         num_contours = min(len(contours), self.max_candidates)
         boxes = np.zeros((num_contours, 4, 2), dtype=np.int16)
         scores = np.zeros((num_contours,), dtype=np.float32)
-
         for index in range(num_contours):
             contour = contours[index]
             points, sside = self.get_mini_boxes(contour)
@@ -157,6 +157,8 @@ class SegDetectorRepresenter():
                 np.round(box[:, 1] / height * dest_height), 0, dest_height)
             boxes[index, :, :] = box.astype(np.int16)
             scores[index] = score
+        print(boxes)
+       
         return boxes, scores
 
     def unclip(self, box, unclip_ratio=1.5):

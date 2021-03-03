@@ -22,6 +22,7 @@ from tqdm import tqdm
 from dataset import processes
 from collections import OrderedDict
 from dataset.processes import *
+import copy 
 from utils.general import xyxy2xywh, xywh2xyxy, xywhn2xyxy, xyn2xy, segment2box, segments2boxes, resample_segments, \
     clean_str
 from utils.torch_utils import torch_distributed_zero_first
@@ -39,17 +40,17 @@ for orientation in ExifTags.TAGS.keys():
 
 
 def build_dataloader(path, imgsz, batch_size, opt, hyp=None, augment=False, cache=False, pad=0.0, rect=False,
-                    rank=-1, world_size=1, workers=8, image_weights=False, quad=False, prefix='', process_list=[]):
+                    rank=-1, world_size=1, workers=8, image_weights=False, quad=False, prefix='', process_list=[], mode='train'):
     # Make sure only the first process in DDP process the dataset first, and the following others can use the cache
-    with torch_distributed_zero_first(rank):
-        dataset = LoadImagesAndLabels(path, imgsz, batch_size,
-                                    augment=augment,  # augment images
-                                    hyp=hyp,  # augmentation hyperparameters
-                                    cache_images=cache,
-                                    pad=pad,
-                                    image_weights=image_weights,
-                                    prefix=prefix, 
-                                    process_list=process_list)
+    #with torch_distributed_zero_first(rank):
+    dataset = LoadImagesAndLabels(path, imgsz, batch_size,
+                                augment=augment,  # augment images
+                                hyp=hyp,  # augmentation hyperparameters
+                                cache_images=cache,
+                                pad=pad,
+                                image_weights=image_weights,
+                                prefix=prefix, 
+                                process_list=process_list)
 
     batch_size = min(batch_size, len(dataset))
     nw = min([os.cpu_count() // world_size, batch_size if batch_size > 1 else 0, workers])  # number of workers
@@ -57,18 +58,16 @@ def build_dataloader(path, imgsz, batch_size, opt, hyp=None, augment=False, cach
     sampler = None
     loader = torch.utils.data.DataLoader #if image_weights else InfiniteDataLoader
     # Use torch.utils.data.DataLoader() if dataset.properties will update during training else InfiniteDataLoader()
-    # dataloader = loader(dataset,
-    #                     batch_size=batch_size,
-    #                     num_workers=nw,
-    #                     sampler=sampler,
-    #                     pin_memory=True,
-    #                     collate_fn=LoadImagesAndLabels.collate_fn)
+    if mode == 'train':
+        collate_fn = torch.utils.data.dataloader.default_collate
+    else:
+        collate_fn = LoadImagesAndLabels.collate_fn
     dataloader = loader(dataset,
                         batch_size=batch_size,
                         num_workers=nw,
                         sampler=sampler,
                         pin_memory=True,
-                        collate_fn=torch.utils.data.dataloader.default_collate)
+                        collate_fn=collate_fn)
     return dataloader, dataset
 
 
@@ -96,17 +95,9 @@ def letterbox_label(x, w=640, h=640, padw=0, padh=0):
     # Convert nx4 boxes from [x, y, w, h] normalized to [x1, y1, x2, y2] where xy1=top-left, xy2=bottom-right
     for item in x:
         y = item['poly']
-        #y = x.clone() if isinstance(x, torch.Tensor) else np.copy(x)
         y[:, 0] = w*y[:, 0]+ padw 
         y[:, 1] = h*y[:, 1]+ padh 
-        
-        item['poly'] = y
-
-    # y[:, 0] = w * (x[:, 0] - x[:, 2] / 2) + padw  # top left x
-    # y[:, 1] = h * (x[:, 1] - x[:, 3] / 2) + padh  # top left y
-    # y[:, 2] = w * (x[:, 0] + x[:, 2] / 2) + padw  # bottom right x
-    # y[:, 3] = h * (x[:, 1] + x[:, 3] / 2) + padh  # bottom right y
-    return x 
+    return x
 
 class LoadImages:  # for inference
     def __init__(self, path, img_size=640, stride=32):
@@ -243,12 +234,12 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         # Check cache
         self.label_files = img2label_paths(self.img_files)  # labels
         cache_path = (p if p.is_file() else Path(self.label_files[0]).parent).with_suffix('.cache')  # cached labels
-        # if cache_path.is_file():
-        #     cache, exists = torch.load(cache_path), True  # load
-        #     if cache['hash'] != get_hash(self.label_files + self.img_files) or 'version' not in cache:  # changed
-        #         cache, exists = self.cache_labels(cache_path, prefix), False  # re-cache
-        # else:
-        cache, exists = self.cache_labels(cache_path, prefix), False  # cache
+        if cache_path.is_file():
+            cache, exists = torch.load(cache_path), True  # load
+            if cache['hash'] != get_hash(self.label_files + self.img_files) or 'version' not in cache:  # changed
+                cache, exists = self.cache_labels(cache_path, prefix), False  # re-cache
+        else:
+            cache, exists = self.cache_labels(cache_path, prefix), False  # cache
 
         # Display cache
         nf, nm, ne, nc, n = cache.pop('results')  # found, missing, empty, corrupted, total
@@ -386,7 +377,8 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
             img, ratio, pad = letterbox(img, shape, auto=False, scaleup=self.augment)
             shapes = (h0, w0), ((h / h0, w / w0), pad)  # for COCO mAP rescaling
 
-            labels = self.labels[index].copy()
+            labels = copy.deepcopy(self.labels[index])
+            #print(labels)
             #print(len(labels))
             if len(labels):  # normalized xywh to pixel xyxy format
                 labels = letterbox_label(labels, ratio[0] * w, ratio[1] * h, padw=pad[0], padh=pad[1])
@@ -394,62 +386,25 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         data['image'] = img 
         data['lines'] = labels
 
-        #print(img.shape)
     #     polys = [x['poly'].astype('int32') for x in labels]
     #    # print(polys)
     #     cv2.polylines(img, polys, True, (0, 255, 0), 2)
     #     cv2.imwrite('test.jpg',img)
         for processor in self.processors:
-          #  print(processor)
             data = processor(data)
-        #print(data)
+
+       
+        # image = data['image']
+        # gt = data['gt']
+        # gt = gt.transpose(1, 2, 0) * 255
+        
+        # std = np.array([0.229, 0.224, 0.225]).reshape(3, 1, 1)
+        # mean = np.array([0.485, 0.456, 0.406]).reshape(3, 1, 1)
+        # image = (image.cpu().numpy() * std + mean).transpose(1, 2, 0) * 255
+
+        # cv2.imwrite(f'./data/debug_img/test_{index}_image.jpg',image)
+        # cv2.imwrite(f'./data/debug_img/test_{index}_gt.jpg',gt)
         return data 
-        # if self.augment:
-            # Augment imagespace
-            # if not mosaic:
-                
-                # img, labels = random_perspective(img, labels,
-                #                                  degrees=hyp['degrees'],
-                #                                  translate=hyp['translate'],
-                #                                  scale=hyp['scale'],
-                #                                  shear=hyp['shear'],
-                #                                  perspective=hyp['perspective'])
-
-            # Augment colorspace
-            #augment_hsv(img, hgain=hyp['hsv_h'], sgain=hyp['hsv_s'], vgain=hyp['hsv_v'])
-
-            # Apply cutouts
-            # if random.random() < 0.9:
-            #     labels = cutout(img, labels)
-
-        # nL = len(labels)  # number of labels
-        # if nL:
-        #     labels[:, 1:5] = xyxy2xywh(labels[:, 1:5])  # convert xyxy to xywh
-        #     labels[:, [2, 4]] /= img.shape[0]  # normalized height 0-1
-        #     labels[:, [1, 3]] /= img.shape[1]  # normalized width 0-1
-
-        # if self.augment:
-        #     # flip up-down
-        #     if random.random() < hyp['flipud']:
-        #         img = np.flipud(img)
-        #         if nL:
-        #             labels[:, 2] = 1 - labels[:, 2]
-
-        #     # flip left-right
-        #     if random.random() < hyp['fliplr']:
-        #         img = np.fliplr(img)
-        #         if nL:
-        #             labels[:, 1] = 1 - labels[:, 1]
-
-        # labels_out = torch.zeros((nL, 6))
-        # if nL:
-        #     labels_out[:, 1:] = torch.from_numpy(labels)
-
-        # # Convert
-        # img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
-        # img = np.ascontiguousarray(img)
-
-        #return torch.from_numpy(img), labels_out, self.img_files[index], shapes
 
     @staticmethod
     def collate_fn(batch):

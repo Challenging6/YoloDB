@@ -3,14 +3,15 @@ import logging
 import os 
 from tqdm import tqdm 
 from .representer import SegDetectorRepresenter
-from .measurer import ICDARDetectionMeasurer
+from .measurer import QuadMeasurer
+import cv2 
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 class Validator():
     def __init__(self):
         self.representer = SegDetectorRepresenter()
-        self.measurer = ICDARDetectionMeasurer()
+        self.measurer = QuadMeasurer()
 
 
     def validate(self, validation_loaders, model, epoch, step, visualize=False):
@@ -32,7 +33,7 @@ class Validator():
 
         for key, metric in all_matircs.items():
             logger.info('%s : %f (%d)' % (key, metric.avg, metric.count))
-        self.logger.metrics(epoch, self.steps, all_matircs)
+       # self.logger.metrics(epoch, self.steps, all_matircs)
         model.train()
         return all_matircs
 
@@ -41,12 +42,23 @@ class Validator():
         vis_images = dict()
         for i, batch in tqdm(enumerate(data_loader), total=len(data_loader)):
             pred = model.compute_loss(batch, training=False)
+            #print(pred.shape)
+            seg = pred > 0.3
+          #  print(seg.shape)
+            seg = seg.cpu().numpy()[0][0]
+          #  print(seg.shape)
+            seg = seg*255
+            cv2.imwrite('mask.jpg', seg)
             output = self.representer.represent(batch, pred)
-            raw_metric, interested = self.measurer.validate_measure(batch, output)
+            #print(output[0])
+            
+            #raw_metric, interested = self.measurer.validate_measure(batch, output)
+            raw_metric  = self.measurer.validate_measure(batch, output)
+            
             raw_metrics.append(raw_metric)
 
-            if visualize and self.visualizer:
-                vis_image = self.visualizer.visualize(batch, output, interested)
-                vis_images.update(vis_image)
-        metrics = self.measurer.gather_measure(raw_metrics, self.logger)
+            # if visualize and self.visualizer:
+            #     vis_image = self.visualizer.visualize(batch, output, interested)
+            #     vis_images.update(vis_image)
+        metrics = self.measurer.gather_measure(raw_metrics)  
         return metrics, vis_images

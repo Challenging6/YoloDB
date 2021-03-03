@@ -8,7 +8,7 @@ from models.loss import *
 import yaml 
 
 def build_backbone(config):
-    backbone = eval(config['name'])()#(config['args'])
+    backbone = eval(config['name'])(pretrained=True)#(config['args'])
     return backbone 
 
 def build_neck(config):
@@ -16,7 +16,7 @@ def build_neck(config):
     return neck 
 
 def build_head(config):
-    head = eval(config['name'])()#(config['args'])
+    head = eval(config['name'])(adaptive=True)#()
     return head 
 
 def build_criterion(config):
@@ -49,17 +49,19 @@ class Model(nn.Module):
     def compute_loss(self, batch, training=False):
         if isinstance(batch, dict):
             data = batch['image'].to(self.device)
-            
+        else:
+            data = batch.to(self.device)
+        data = data.float()
         pred = self.forward(data, training=training)
-       # print(pred)
-        # if self.training:
-        for key, value in batch.items():
-            if value is not None:
-                if hasattr(value, 'to'):
-                    batch[key] = value.to(self.device)
-        #print(batch)
-        loss_with_metrics = self.criterion(pred, batch)
-        loss, metrics = loss_with_metrics
-        return loss, pred, metrics
+       
+        if training:
+            for key, value in batch.items():
+                if value is not None:
+                    if hasattr(value, 'to'):
+                        batch[key] = value.to(self.device)
+            loss_with_metrics = self.criterion(pred, batch)
+            loss, metrics = loss_with_metrics
+            return loss, pred, metrics
+        return pred
 
         

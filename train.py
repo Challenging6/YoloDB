@@ -28,7 +28,7 @@ from utils.general import labels_to_class_weights, increment_path, labels_to_ima
     check_requirements, print_mutation, set_logging, one_cycle, colorstr
 from utils.torch_utils import intersect_dicts, ModelEMA, is_parallel
 from utils.plots import plot_images, plot_labels, plot_results, plot_evolution
-from utils.valid import Validator
+from evaltool.valid import Validator
 
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -206,18 +206,6 @@ class Trainer():
             del ckpt
 
  
-        # # DP mode
-        # if cuda and rank == -1 and torch.cuda.device_count() > 1:
-        #     model = torch.nn.DataParallel(model)
-
-        # # SyncBatchNorm
-        # if opt.sync_bn and cuda and rank != -1:
-        #     model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model).to(device)
-        #     logger.info('Using SyncBatchNorm()')
-
-        # DDP mode
-        # if cuda and rank != -1:
-        #     model = DDP(model, device_ids=[opt.local_rank], output_device=opt.local_rank)
 
         imgsz, imgsz_test = opt.img_size
 
@@ -229,15 +217,15 @@ class Trainer():
                                                 hyp=hyp, augment=True, cache=opt.cache_images, rect=opt.rect, 
                                                 workers=opt.workers,
                                                 image_weights=opt.image_weights, quad=opt.quad, prefix=colorstr('train: '),
-                                                process_list=train_process)
+                                                process_list=train_process, mode='train')
     
         num_of_batches = len(dataloader)  # number of batches
        
     
-        testloader = build_dataloader(test_path, imgsz_test, batch_size * 2,  opt,  # testloader
+        testloader = build_dataloader(test_path, imgsz_test, batch_size, opt,  # testloader
                                     hyp=hyp, cache=opt.cache_images and not opt.notest, rect=True, rank=-1,
                                     workers=opt.workers,
-                                    pad=0.5, prefix=colorstr('val: '), process_list=val_process)[0]
+                                    pad=0.5, prefix=colorstr('val: '), process_list=val_process, mode='valid')[0]
 
         # if not opt.resume:
         #     labels = np.concatenate(dataset.labels, 0)
@@ -258,32 +246,17 @@ class Trainer():
         maps = np.zeros(nc)  # mAP per class
         results = (0, 0, 0, 0, 0, 0, 0)  # P, R, mAP@.5, mAP@.5-.95, val_loss(box, obj, cls)
         self.scheduler.last_epoch = start_epoch - 1  # do not move
-        scaler = amp.GradScaler(enabled=cuda)
+        scaler = amp.GradScaler(enabled=False)
         logger.info(f'Image sizes {imgsz} train, {imgsz_test} test\n'
                     f'Using {dataloader.num_workers} dataloader workers\n'
                     f'Logging results to {save_dir}\n'
                     f'Starting training for {epochs} epochs...')
+
         for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
             self.model.train()
 
-            # Update image weights (optional)
-            # if opt.image_weights:
-            #     # Generate indices
-            #     if rank in [-1, 0]:
-            #         cw = self.model.class_weights.cpu().numpy() * (1 - maps) ** 2 / nc  # class weights
-            #         iw = labels_to_image_weights(dataset.labels, nc=nc, class_weights=cw)  # image weights
-            #         dataset.indices = random.choices(range(dataset.n), weights=iw, k=dataset.n)  # rand weighted idx
-            #     # Broadcast if DDP
-            #     if rank != -1:
-            #         indices = (torch.tensor(dataset.indices) if rank == 0 else torch.zeros(dataset.n)).int()
-            #         dist.broadcast(indices, 0)
-            #         if rank != 0:
-            #             dataset.indices = indices.cpu().numpy()
-
-   
             mloss = torch.zeros(4, device=device)  # mean losses
-            # if rank != -1:
-            #     dataloader.sampler.set_epoch(epoch)
+        
             pbar = enumerate(dataloader)
             logger.info(('\n' + '%10s' * 8) % ('Epoch', 'gpu_mem', 'box', 'obj', 'cls', 'total', 'targets', 'img_size'))
            
@@ -291,7 +264,8 @@ class Trainer():
             self.optimizer.zero_grad()
             for i, batch in pbar:  # batch -------------------------------------------------------------
                 ni = i + num_of_batches * epoch  # number integrated batches (since train start)
-              
+                # if i> 1:
+                #     break 
                 # Warmup
                 if ni <= nw:
                     xi = [0, nw]  # x interp
@@ -312,7 +286,7 @@ class Trainer():
                 #         imgs = F.interpolate(imgs, size=ns, mode='bilinear', align_corners=False)
 
                 # Forward
-                with amp.autocast(enabled=cuda):
+                with amp.autocast(enabled=False):
                     loss, pred, metrics = self.model.compute_loss(batch, training=True)
                     
                # print(loss)
@@ -366,16 +340,17 @@ class Trainer():
             self.scheduler.step()
 
            
-            ema.update_attr(self.model, include=['yaml', 'nc', 'hyp', 'gr', 'names', 'stride', 'class_weights'])
+            #ema.update_attr(self.model, include=['yaml', 'nc', 'hyp', 'gr', 'names', 'stride', 'class_weights'])
             final_epoch = epoch + 1 == epochs
+
             if not opt.notest or final_epoch:  # Calculate mAP
-                valid_result = self.validor.validate(testloader, self.model, epoch, num_of_batches*epoch)
+                valid_result = self.validor.validate({'test':testloader}, self.model, epoch, num_of_batches*epoch)
             print(valid_result)
             # Write
-            with open(results_file, 'a') as f:
-                f.write(s + '%10.4g' * 7 % results + '\n')  # append metrics, val_loss
-            if len(opt.name) and opt.bucket:
-                os.system('gsutil cp %s gs://%s/results/results%s.txt' % (results_file, opt.bucket, opt.name))
+            # with open(results_file, 'a') as f:
+            #     f.write(s + '%10.4g' * 7 % results + '\n')  # append metrics, val_loss
+            # if len(opt.name) and opt.bucket:
+            #     os.system('gsutil cp %s gs://%s/results/results%s.txt' % (results_file, opt.bucket, opt.name))
 
             # Log
             # tags = ['train/box_loss', 'train/obj_loss', 'train/cls_loss',  # train loss
@@ -389,26 +364,27 @@ class Trainer():
             #         wandb.log({tag: x}, step=epoch, commit=tag == tags[-1])  # W&B
 
             # Update best mAP
-            fi = fitness(np.array(results).reshape(1, -1))  # weighted combination of [P, R, mAP@.5, mAP@.5-.95]
-            if fi > best_fitness:
-                best_fitness = fi
+            #fi = fitness(np.array(results).reshape(1, -1))  # weighted combination of [P, R, mAP@.5, mAP@.5-.95]
+            
+            # if fi > best_fitness:
+            #     best_fitness = fi
 
-            # Save model
-            if (not opt.nosave) or (final_epoch):  # if save
-                ckpt = {'epoch': epoch,
-                        'best_fitness': best_fitness,
-                        'training_results': results_file.read_text(),
-                        'model': ema.ema if final_epoch else deepcopy(
-                            self.model.module if is_parallel(self.model) else self.model).half(),
-                        'ema': (deepcopy(ema.ema).half(), ema.updates),
-                        'optimizer': self.optimizer.state_dict(),
-                        'wandb_id': wandb_run.id if wandb else None}
+            # # Save model
+            # if (not opt.nosave) or (final_epoch):  # if save
+            #     ckpt = {'epoch': epoch,
+            #             'best_fitness': best_fitness,
+            #          #   'training_results': results_file.read_text(),
+            #             'model': ema.ema if final_epoch else deepcopy(
+            #                 self.model.module if is_parallel(self.model) else self.model).half(),
+            #             'ema': (deepcopy(ema.ema).half(), ema.updates),
+            #             'optimizer': self.optimizer.state_dict(),
+            #             'wandb_id': wandb_run.id if wandb else None}
 
-                # Save last, best and delete
-                torch.save(ckpt, last)
-                if best_fitness == fi:
-                    torch.save(ckpt, best)
-                del ckpt
+            #     # Save last, best and delete
+            #     torch.save(ckpt, last)
+            #     if best_fitness == fi:
+            #         torch.save(ckpt, best)
+            #     del ckpt
 
             # end epoch ----------------------------------------------------------------------------------------------------
         # end training
@@ -496,7 +472,7 @@ if __name__ == '__main__':
     opt = parser.parse_args()
     with open(opt.hyp) as f:
         hyp = yaml.load(f, Loader=yaml.SafeLoader)
-    print(hyp)
+   # print(hyp)
      
 
          # Resume
@@ -517,7 +493,7 @@ if __name__ == '__main__':
        # print(opt.cfg)
     #check_model(hyp)
 
-    device = torch.device('cpu')
+    device = torch.device('cuda:2')
 
     trainer = Trainer(hyp, opt)
     trainer.train(hyp, opt, device)

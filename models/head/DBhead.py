@@ -4,7 +4,7 @@ from collections import OrderedDict
 
 class DBhead(nn.Module):
     def __init__(self,
-                 inner_channels=256, k=10,
+                 inner_channels=256, k=50,
                  bias=False, adaptive=False, smooth=False, serial=False,
                  *args, **kwargs):
         super(DBhead, self).__init__()
@@ -19,8 +19,9 @@ class DBhead(nn.Module):
             nn.ConvTranspose2d(inner_channels//4, 1, 2, 2),
             nn.Sigmoid())
         self.binarize.apply(self.weights_init)
-
+        self.serial = serial 
         self.adaptive = adaptive
+        self.k = k 
         if adaptive:
             self.thresh = self._init_thresh(
                     inner_channels, serial=serial, smooth=smooth, bias=bias)

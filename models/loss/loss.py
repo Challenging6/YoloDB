@@ -22,6 +22,7 @@ class L1BalanceCELoss(nn.Module):
         self.bce_scale = bce_scale
 
     def forward(self, pred, batch):
+       # print(pred.keys())
         bce_loss = self.bce_loss(pred['binary'], batch['gt'], batch['mask'])
         metrics = dict(bce_loss=bce_loss)
         if 'thresh' in pred:
